@@ -258,9 +258,8 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 📞 Support
 
-- **Issues**: [GitHub Issues](https://github.com/yourusername/colpali-rag-pipeline/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/yourusername/colpali-rag-pipeline/discussions)
-- **Documentation**: [Wiki](https://github.com/yourusername/colpali-rag-pipeline/wiki)
+- **Issues**: [GitHub Issues](https://github.com/sancelot/open-webui-multimodal-pipeline/issues)
+- **Discussions**: [GitHub Discussions]([https://github.com/yourusername/colpali-rag-pipeline](https://github.com/sancelot/open-webui-multimodal-pipeline)/discussions)
 
 ## 🔄 Changelog
 
