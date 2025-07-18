@@ -60,7 +60,7 @@ def check_poppler_in_path():
 
 # Set your OpenWebUI API base URL and (optionally) your API key
 BASE_URL = "http://10.1.42.88:8080/api/v1"
-API_KEY = "sk-5d9ab3bd43c846f2a6da49e68dacbbf5"
+API_KEY = "myapikey"
 headers = {
     "Content-Type": "application/json"
 }
