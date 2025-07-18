@@ -30,7 +30,7 @@ graph TB
 ## 📋 Requirements
 
 ### System Dependencies
-- **Python 3.8+**
+- **Python 3.11+**
 - **CUDA-capable GPU** (recommended)
 - **Poppler**: Required for PDF processing
   - Windows: Download from [Poppler for Windows](https://blog.alivate.com.au/poppler-windows/)
