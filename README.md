@@ -16,7 +16,7 @@ A robust, production-ready RAG (Retrieval-Augmented Generation) pipeline that us
 
 ```mermaid
 graph TB
-    A[PDF Documents] --> B[PDF to Image Conversion]
+    A[Knowledge PDF Documents] --> B[PDF to Image Conversion]
     B --> C[ColPali Vision Model]
     C --> D[Vector Embeddings]
     D --> E[Qdrant Vector DB]
