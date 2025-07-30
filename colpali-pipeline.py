@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 title: Multimodal RAG Pipeline using Colpali
 author: Stephane Ancelot
@@ -7,8 +8,8 @@ license: MIT
 description: A pipeline for retrieving relevant information using Vision Language models.
 requirements: pdf2image, qdrant-client, colpali-engine, Pillow
 """
+import logging
 import shutil
-from pdf2image import convert_from_path
 from PIL import Image
 from transformers.utils.import_utils import is_flash_attn_2_available
 import torch
@@ -28,6 +29,23 @@ import time
 import sys
 import json
 import threading
+import io
+sys.path.append("e:\\workspace\\multimrag")
+
+from pdf_optimizer import apply_patch  # noqa
+apply_patch()
+from pdf2image import convert_from_path  # noqa
+from pdf_optimizer import OptimizedPDFConverter  # noqa
+
+converter = OptimizedPDFConverter()
+
+logger = logging.getLogger(__name__)
+logger.setLevel("DEBUG")
+# Create file handler
+file_handler = logging.FileHandler('pipeline.log')
+file_handler.setLevel(logging.DEBUG)
+# Add handler to logger
+logger.addHandler(file_handler)
 
 
 def check_poppler_in_path():
@@ -59,8 +77,8 @@ def check_poppler_in_path():
 
 
 # Set your OpenWebUI API base URL and (optionally) your API key
-BASE_URL = "http://10.1.42.88:8080/api/v1"
-API_KEY = "myapikey"
+BASE_URL = "http://xxxx:8080/api/v1"
+API_KEY = "sk-xxxx"
 headers = {
     "Content-Type": "application/json"
 }
@@ -83,10 +101,10 @@ class Pipeline:
         self.is_fully_initialized = False
         self.initialization_in_progress = False
         self.initialization_lock = threading.Lock()
-        
+
         # Load previous state if exists
         self.load_initialization_state()
-        
+
         print("===========pipeline ready=========")
 
     def load_initialization_state(self):
@@ -95,8 +113,10 @@ class Pipeline:
             if os.path.exists(self.initialization_state_file):
                 with open(self.initialization_state_file, 'r') as f:
                     state = json.load(f)
-                    self.is_fully_initialized = state.get('is_fully_initialized', False)
-                    print(f"Loaded state: fully_initialized={self.is_fully_initialized}")
+                    self.is_fully_initialized = state.get(
+                        'is_fully_initialized', False)
+                    print(
+                        f"Loaded state: fully_initialized={self.is_fully_initialized}")
             else:
                 print("No previous state found - first run")
         except Exception as e:
@@ -112,7 +132,8 @@ class Pipeline:
             }
             with open(self.initialization_state_file, 'w') as f:
                 json.dump(state, f, indent=2)
-            print(f"Saved state: fully_initialized={self.is_fully_initialized}")
+            print(
+                f"Saved state: fully_initialized={self.is_fully_initialized}")
         except Exception as e:
             print(f"Error saving state: {e}")
 
@@ -150,13 +171,17 @@ class Pipeline:
 
         try:
             print(f"Converting {pdf_file.name}...")
-
+            start = time.time()
             total_threads = os.cpu_count()
             half_threads = total_threads // 2
+            half_threads = 1
             # Convert PDF to images
-            images = convert_from_path(
-                pdf_file, dpi=dpi, thread_count=half_threads)
+            # images = convert_from_path(pdf_file, dpi = dpi, thread_count = half_threads, use_pdftocairo = True)
+            images = converter.convert_from_path_optimized(
+                pdf_file, optimization_strategy="async", dpi=dpi, fmt="png")
 
+            end = time.time()
+            print(f"spent {end-start}s")
             # Save each page as separate image
             for i, image in enumerate(images):
                 if len(images) == 1:
@@ -284,20 +309,11 @@ class Pipeline:
     def perform_full_initialization(self):
         """Perform the heavy initialization work (models, documents, etc.)"""
         print(f"========== Starting full initialization =============")
-        
+
         try:
             # Wait a bit to ensure API is fully available
             time.sleep(2)
-            
-            data = self.get_knowledge_docs()
-            if not data:
-                print("No knowledge documents found or API error")
-                return False
-                
-            ids = []
-            metadatas = []
-            self.id_map = {}         # Maps int -> UUID
-            self.reverse_id_map = {}  # Maps UUID -> int
+
             self.dbclient = QdrantClient(path="mydb")
 
             model_name = "vidore/colqwen2.5-v0.1"
@@ -316,59 +332,73 @@ class Pipeline:
             except Exception as e:
                 print(f"Cannot load colpali models: {e}")
                 return False
-                
-            index = 0
-            for doc in data:
-                print(f"Processing knowledge: {doc.get('name')}")
-                collection_name = doc.get('name')
-                try:
-                    # Try to delete existing collection
-                    self.dbclient.delete_collection(collection_name)
-                    print(f"Deleted existing collection: {collection_name}")
-                except Exception as e:
-                    print(
-                        f"Collection {collection_name} didn't exist or couldn't be deleted: {e}")
-                        
-                collection = self.dbclient.create_collection(
-                    collection_name, 
-                    on_disk_payload=True,
-                    optimizers_config=models.OptimizersConfigDiff(
-                        indexing_threshold=100
-                    ),
-                    vectors_config=models.VectorParams(
-                        size=128,
-                        distance=models.Distance.COSINE,
-                        multivector_config=models.MultiVectorConfig(
-                            comparator=models.MultiVectorComparator.MAX_SIM
-                        ),
-                        quantization_config=models.ScalarQuantization(
-                            scalar=models.ScalarQuantizationConfig(
-                                type=models.ScalarType.INT8,
-                                quantile=0.99,
-                                always_ram=True,
-                            ),
-                        ),
-                    ),
-                )
+            if not self.is_fully_initialized:
+                data = self.get_knowledge_docs()
+                if not data:
+                    print("No knowledge documents found or API error")
+                    return False
 
-                for file in doc.get('files'):
-                    file_id = file.get('id')
-                    filename = file.get('meta').get('name')
-                    print(f"Processing file: {filename} (ID: {file_id})")
-                    
-                    self.download_knowledge_file(file_id, filename)
-                    ids.append(index)
-                    metadatas.append(file.get('meta'))
-                    self.id_map[index] = file_id
-                    self.reverse_id_map[file_id] = index
-                    self.ingest_document(filename, collection_name)
-                    index += 1
-                    
-            print(f"✓ Full initialization completed successfully")
-            self.is_fully_initialized = True
-            self.save_initialization_state()
+                ids = []
+                metadatas = []
+                self.id_map = {}         # Maps int -> UUID
+                self.reverse_id_map = {}  # Maps UUID -> int
+                index = 0
+                for doc in data:
+
+                    print(f"Processing knowledge: {doc.get('name')}")
+                    collection_name = doc.get('name')
+                    if collection_name == "SAV_Soft":
+
+                        try:
+                            # Try to delete existing collection
+                            self.dbclient.delete_collection(collection_name)
+                            print(
+                                f"Deleted existing collection: {collection_name}")
+                        except Exception as e:
+                            print(
+                                f"Collection {collection_name} didn't exist or couldn't be deleted: {e}")
+
+                        collection = self.dbclient.create_collection(
+                            collection_name,
+                            on_disk_payload=True,
+                            optimizers_config=models.OptimizersConfigDiff(
+                                indexing_threshold=100
+                            ),
+                            vectors_config=models.VectorParams(
+                                size=128,
+                                distance=models.Distance.COSINE,
+                                multivector_config=models.MultiVectorConfig(
+                                    comparator=models.MultiVectorComparator.MAX_SIM
+                                ),
+                                quantization_config=models.ScalarQuantization(
+                                    scalar=models.ScalarQuantizationConfig(
+                                        type=models.ScalarType.INT8,
+                                        quantile=0.99,
+                                        always_ram=True,
+                                    ),
+                                ),
+                            ),
+                        )
+
+                        for file in doc.get('files'):
+                            file_id = file.get('id')
+                            filename = file.get('meta').get('name')
+                            print(
+                                f"Processing file: {filename} (ID: {file_id})")
+
+                            self.download_knowledge_file(file_id, filename)
+                            ids.append(index)
+                            metadatas.append(file.get('meta'))
+                            self.id_map[index] = file_id
+                            self.reverse_id_map[file_id] = index
+                            self.ingest_document(filename, collection_name)
+                            index += 1
+
+                print(f"✓ Full initialization completed successfully")
+                self.is_fully_initialized = True
+                self.save_initialization_state()
             return True
-            
+
         except Exception as e:
             print(f"Error during full initialization: {e}")
             return False
@@ -380,7 +410,7 @@ class Pipeline:
         def background_init():
             print("Starting background initialization...")
             self.perform_full_initialization()
-            
+
         thread = threading.Thread(target=background_init, daemon=True)
         thread.start()
         print("Background initialization thread started")
@@ -388,52 +418,53 @@ class Pipeline:
     async def on_startup(self):
         """Lightweight startup - defer heavy work to background"""
         print(f"========== RAG pipeline startup (lightweight) =============")
-        
+
         # If already fully initialized, nothing to do
-        if self.is_fully_initialized:
-            print("Pipeline already fully initialized")
-            return
-            
+        # if self.is_fully_initialized:
+        #     print("Pipeline already fully initialized")
+        #     return
+
         # If this is the first time or initialization was reset
         with self.initialization_lock:
             if not self.initialization_in_progress:
                 self.initialization_in_progress = True
                 # Start background initialization after startup completes
                 # Use a small delay to ensure backend is fully up
+
                 def delayed_init():
                     time.sleep(1)  # Give backend time to be fully ready
                     self.perform_full_initialization()
-                
+
                 thread = threading.Thread(target=delayed_init, daemon=True)
                 thread.start()
                 print("Background initialization scheduled")
-        
+
         print(f"========== RAG pipeline startup completed quickly =============")
 
     async def on_shutdown(self):
         print(f"=========== RAG Pipeline shutdown =================")
         pass
 
-    async def ensure_initialized(self):
+    def ensure_initialized(self):
         """Ensure the pipeline is fully initialized before processing queries"""
         if self.is_fully_initialized:
             return True
-            
+
         # If initialization is in progress, wait for it
         if self.initialization_in_progress:
             print("Initialization in progress, please wait...")
             max_wait = 300  # 5 minutes max wait
             waited = 0
             while self.initialization_in_progress and waited < max_wait:
-                await asyncio.sleep(1)
+                asyncio.sleep(1)
                 waited += 1
-            
+
             if self.is_fully_initialized:
                 return True
             else:
                 print("Initialization timed out or failed")
                 return False
-        
+
         # Try to initialize now if not in progress
         print("Pipeline not initialized - attempting initialization...")
         with self.initialization_lock:
@@ -441,13 +472,14 @@ class Pipeline:
                 self.initialization_in_progress = True
                 success = self.perform_full_initialization()
                 return success
-        
+
         return False
 
-    def query(self, question, top_k=5):
+    def query_db(self, question, top_k=5):
         if not hasattr(self, 'model') or not hasattr(self, 'processor'):
-            raise Exception("Models not loaded - initialization incomplete")
-            
+            raise Exception(
+                "Models not loaded - initialization incomplete - retry in few minutes")
+        results = None
         batch_queries = self.processor.process_queries(
             [question]).to(self.model.device)
         with torch.no_grad():
@@ -455,29 +487,246 @@ class Pipeline:
             multivector = torch.unbind(query_embedding.to("cpu"))[
                 0].float().numpy()
             results = self.dbclient.query_points(
-                collection_name="documents",
+                collection_name="SAV_Soft",
                 query=multivector,
                 limit=top_k
             )
-            for point in results.points:
-                print(point)
         return results
 
-    async def pipe(
+#     def query_vlm(self, query: str, image_documents: List[ImageDocument]) -> str:
+#         """
+#         Query the VLM with retrieved images
+
+#         Args:
+#             query: User question
+#             image_documents: Retrieved image documents
+
+#         Returns:
+#             VLM response
+#         """
+#         if not image_documents:
+#             return "No relevant documents found to answer your question."
+
+#         # Prepare the prompt
+#         context_info = []
+#         for i, img_doc in enumerate(image_documents):
+#             doc_info = f"Document {i+1}"
+#             if 'doc_id' in img_doc.metadata:
+#                 doc_info += f" (ID: {img_doc.metadata['doc_id']})"
+#             if 'page_num' in img_doc.metadata:
+#                 doc_info += f" - Page {img_doc.metadata['page_num']}"
+#             if 'score' in img_doc.metadata:
+#                 doc_info += f" - Relevance: {img_doc.metadata['score']:.3f}"
+#             context_info.append(doc_info)
+
+#         prompt = f"""Based on the following retrieved documents, please answer this question: {query}
+
+# Retrieved documents:
+# {chr(10).join(context_info)}
+
+# Please analyze the images and provide a comprehensive answer. If the answer cannot be found in the provided documents, please say so clearly."""
+
+#         try:
+#             print("Querying VLM...")
+#             response = self.vlm.complete(
+#                 prompt=prompt,
+#                 image_documents=image_documents
+#             )
+#             return response.text
+
+#         except Exception as e:
+#             return f"Error querying VLM: {str(e)}"
+    def process_retrieved_images(self, results: List[Dict]) -> List:
+        """
+        Convert retrieved results to ImageDocument objects for VLM processing
+
+        Args:
+            results: Results from ColPali search
+
+        Returns:
+            List of image objects
+        """
+        image_documents = []
+        logger.debug("process doc")
+        for doc in results:
+            logger.debug(
+                f"{doc.payload['source']} page  {doc.payload['image_index']}")
+
+        for i, result in enumerate(results):
+            # Extract base64 image data
+            # result = result.dict()
+            # print(result.keys())
+            # print("page ", result.get('page_num'),
+            #       " ", result.get('doc_id'))
+            logger.debug(f"type data {type(result)}")
+            # logger.debug(f"{result.keys()}")
+            if 'base64' in result.payload:
+                logger.debug("cas1")
+                base64_data = result.payload['base64']
+                # Remove data URL prefix if present
+                if base64_data.startswith('data:image'):
+                    base64_data = base64_data.split(',')[1]
+                image_documents.append(base64_data)
+
+            elif 'image' in result.payload:
+                logger.debug("cas2")
+
+                # Handle PIL Image objects
+                pil_image = result.payload['image']
+                if isinstance(pil_image, Image.Image):
+                    # Convert PIL image to base64
+                    buffered = io.BytesIO()
+                    pil_image.save(buffered, format="PNG")
+                    img_base64 = base64.b64encode(
+                        buffered.getvalue()).decode()
+                    image_documents.append(img_base64)
+        logger.debug("process doc done")
+        return image_documents
+
+    def add_images_to_messages(self, json_data, images_list=None, message_index=None):
+        """
+        Add an 'images' field to specific message(s) in the Ollama JSON request.
+
+        Args:
+            json_data: Dictionary or JSON string containing the request
+            images_list: List of base64 encoded images (default: empty list)
+            message_index: Index of message to add images to (default: all user messages)
+
+        Returns:
+            Modified dictionary with images field added to messages
+        """
+        if images_list is None:
+            images_list = []
+
+        # Handle string input
+        if isinstance(json_data, str):
+            data = json.loads(json_data)
+        else:
+            data = json_data.copy()  # Don't modify original
+
+        # Add images to specific message or all user messages
+        if "messages" in data:
+            for i, message in enumerate(data["messages"]):
+                # Add to specific message index or all user messages
+                if message_index is None:
+                    if message.get("role") == "user":
+                        message["images"] = images_list
+                elif i == message_index:
+                    message["images"] = images_list
+
+        return data
+
+    def add_images_to_last_user_message(self, json_data, images_list=None):
+        """
+        Add images to the last user message in the conversation.
+
+        Args:
+            json_data: Dictionary or JSON string containing the request
+            images_list: List of base64 encoded images
+
+        Returns:
+            Modified dictionary with images added to last user message
+        """
+        if images_list is None:
+            images_list = []
+
+        if isinstance(json_data, str):
+            data = json.loads(json_data)
+        else:
+            data = json_data.copy()
+
+        if "messages" in data:
+            # Find last user message and add images
+            for message in reversed(data["messages"]):
+                if message.get("role") == "user":
+                    message["images"] = images_list
+                    break
+
+        return data
+
+    def pipe(
         self, user_message: str, model_id: str, messages: List[dict], body: dict
     ) -> Union[str, Generator, Iterator]:
+        logger.debug("==============================================")
+        # logger.debug(f"messages {messages}") fait peter le log
+        logger.debug(f"user_message {user_message}")
 
-        print(f"messages {messages}")
-        print(f"user_message {user_message}")
+        logger.debug(f"stream {body['stream']}")
+        logger.debug(f"usermsg {body['user']}")
+        # Check if title generation is requested
+        # as of 12/28/24, these were standard greetings
+        if ("broad tags categorizing" in user_message.lower()) or ("create a concise" in user_message.lower()):
+            # ## Create a concise, 3-5 word title with
+            # ## Task:\nGenerate 1-3 broad tags categorizing the main themes
+            logger.debug(f"Title Generation (aborted): {user_message}")
+            return "(title generation disabled)"
 
         # Ensure initialization before processing
-        if not await self.ensure_initialized():
+        if not self.ensure_initialized():
+            logger.debug(
+                "Pipeline initialization failed or incomplete. Please wait a moment and try again.")
             return "Pipeline initialization failed or incomplete. Please wait a moment and try again."
 
         try:
-            response = self.query(user_message)
-            return response
+
+            try:
+                if body["stream"]:
+                    retrieved_docs = self.query_db(user_message)
+                    images = self.process_retrieved_images(
+                        retrieved_docs.points)
+                    try:
+                        logger.debug("add images")
+                        body = self.add_images_to_last_user_message(
+                            body, images)
+                        logger.debug("add images done")
+                    except Exception as e:
+                        return f"Error adding images: {e}"
+                    try:
+                        logger.debug("=========== BODY CONTENT======")
+                        logger.debug(json.dumps(
+                            body, indent=2, ensure_ascii=False))
+                        logger.debug("=========== BODY CONTENT END======")
+                    except:
+                        pass
+
+                model_id = "qwen2.5vl:latest"
+                r = requests.post(
+                    url="http://192.168.0.115:11434/api/chat",
+                    json={**body, "model": model_id},
+                    headers={"Content-Type": "application/json"},  # Add this
+                    stream=True,
+                )
+
+                r.raise_for_status()
+
+                if body.get("stream", False):
+                    # Handle streaming response
+                    def stream_generator():
+                        for line in r.iter_lines():
+                            if line:
+                                try:
+                                    chunk = json.loads(line.decode('utf-8'))
+                                    if 'message' in chunk and 'content' in chunk['message']:
+                                        yield chunk['message']['content']
+                                except json.JSONDecodeError:
+                                    continue
+                    return stream_generator()
+                else:
+                    # Handle non-streaming response
+                    response_json = r.json()
+                    logger.debug(
+                        f"Response JSON: {json.dumps(response_json, indent=2)}")
+
+                    # Extract the actual message content
+                    if 'message' in response_json and 'content' in response_json['message']:
+                        return response_json['message']['content']
+                    else:
+                        logger.debug("Unexpected response format")
+                        return f"Unexpected response format: {response_json}"
+            except Exception as e:
+                return f"Error: {e}"
         except Exception as e:
+            logger.debug(f"Error during query processing: {e}")
             print(f"Error during query processing: {e}")
             return f"Error processing query: {str(e)}"
 
